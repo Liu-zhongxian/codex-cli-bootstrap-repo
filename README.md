@@ -4,6 +4,11 @@ Windows installer bootstrap for OpenAI Codex CLI.
 
 This project checks whether `git`, `node`, and `npm` are installed, verifies that their versions meet the current `@openai/codex` package requirements, upgrades missing or outdated dependencies when possible, and then installs the latest Codex CLI automatically.
 
+By default, the Windows bootstrap targets:
+
+- `Node.js 22.22.2` when Node/npm are missing or too old
+- `Git 2.53.0` when Git is missing or too old
+
 ## Files
 
 - `install-codex.cmd`: double-click friendly Windows launcher
@@ -52,19 +57,21 @@ codex --version
 
 - Windows
 - Internet access
-- `winget` available for automatic installation or upgrade of Git and Node.js
+- `winget` is preferred for automatic installation or upgrade of Git and Node.js
+- If `winget` is unavailable, the script falls back to the official Node.js and Git installers
 
 ## What the script does
 
 1. Detects `git`
 2. Detects `node` and `npm`
-3. Fetches the latest `@openai/codex` package metadata from npm
-4. Compares the current local environment against the current Codex CLI requirements
-5. Installs or upgrades missing tools
-6. Installs the latest `@openai/codex`
+3. Installs `Git 2.53.0` when Git is missing or below the target version
+4. Installs `Node.js 22.22.2` when Node/npm are missing or below the target version
+5. Fetches the latest `@openai/codex` package metadata from npm
+6. Compares the current local environment against the current Codex CLI requirements
+7. Installs the latest `@openai/codex`
 
 ## Notes
 
 - The current script is Windows-only.
 - Some corporate or locked-down machines may require Administrator approval.
-- If `winget` is unavailable, install App Installer from Microsoft Store first.
+- Some environments may still block unattended installers through group policy or endpoint security.

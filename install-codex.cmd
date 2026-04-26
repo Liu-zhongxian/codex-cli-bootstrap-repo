@@ -3,10 +3,17 @@ setlocal EnableExtensions
 
 set "SCRIPT_DIR=%~dp0"
 set "BOOTSTRAP_SCRIPT=%SCRIPT_DIR%scripts\bootstrap-codex-cli.ps1"
+set "POWERSHELL_EXE=%SystemRoot%\System32\WindowsPowerShell\v1.0\powershell.exe"
 
 if not exist "%BOOTSTRAP_SCRIPT%" (
   echo [error] Bootstrap script was not found:
   echo         %BOOTSTRAP_SCRIPT%
+  exit /b 1
+)
+
+if not exist "%POWERSHELL_EXE%" (
+  echo [error] PowerShell was not found:
+  echo         %POWERSHELL_EXE%
   exit /b 1
 )
 
@@ -31,7 +38,7 @@ goto parse_args
 
 :run_installer
 echo Starting Codex CLI bootstrap...
-powershell.exe -NoProfile -ExecutionPolicy Bypass -File "%BOOTSTRAP_SCRIPT%" %FORWARDED_ARGS%
+"%POWERSHELL_EXE%" -NoProfile -ExecutionPolicy Bypass -File "%BOOTSTRAP_SCRIPT%" %FORWARDED_ARGS%
 set "EXIT_CODE=%ERRORLEVEL%"
 
 if not "%EXIT_CODE%"=="0" (
