@@ -1,13 +1,15 @@
+**Language:** English | [简体中文](./README.zh-CN.md)
+
 # Codex CLI Bootstrap
 
 Windows installer bootstrap for OpenAI Codex CLI.
 
 This project checks whether `git`, `node`, and `npm` are installed, verifies that their versions meet the current `@openai/codex` package requirements, upgrades missing or outdated dependencies when possible, and then installs the latest Codex CLI automatically.
 
-By default, the Windows bootstrap targets:
+By default, the Windows bootstrap requires at least:
 
-- `Node.js 22.22.2` when Node/npm are missing or too old
-- `Git 2.53.0` when Git is missing or too old
+- `Node.js 22.22.2`
+- `Git 2.53.0`
 
 ## Files
 
@@ -64,8 +66,8 @@ codex --version
 
 1. Detects `git`
 2. Detects `node` and `npm`
-3. Installs `Git 2.53.0` when Git is missing or below the target version
-4. Installs `Node.js 22.22.2` when Node/npm are missing or below the target version
+3. Ensures `Git` is at least `2.53.0`
+4. Ensures `Node.js` is at least `22.22.2`
 5. Fetches the latest `@openai/codex` package metadata from npm
 6. Compares the current local environment against the current Codex CLI requirements
 7. Installs the latest `@openai/codex`

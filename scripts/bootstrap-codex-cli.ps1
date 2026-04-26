@@ -1,11 +1,11 @@
 [CmdletBinding()]
 param(
   [switch]$DryRun,
-  [version]$TargetGitVersion = [version]'2.53.0',
+  [version]$MinGitVersion = [version]'2.53.0',
   [version]$MinNpmVersion = [version]'8.0.0',
-  [version]$TargetNodeVersion = [version]'22.22.2',
-  [string]$TargetNodePackageVersion = '22.22.2',
-  [string]$TargetGitPackageVersion = '2.53.0',
+  [version]$MinNodeVersion = [version]'22.22.2',
+  [string]$BootstrapNodePackageVersion = '22.22.2',
+  [string]$BootstrapGitPackageVersion = '2.53.0',
   [string]$NodeWingetId = 'OpenJS.NodeJS.LTS',
   [string]$GitWingetId = 'Git.Git'
 )
@@ -173,6 +173,15 @@ function Ensure-NpmCache {
   Ensure-Directory -Path $script:NpmCacheDir
 }
 
+function Get-DefaultCodexMetadata {
+  return [pscustomobject]@{
+    version = 'latest'
+    engines = [pscustomobject]@{
+      node = '>=16'
+    }
+  }
+}
+
 function Ensure-InstallerCache {
   Ensure-Directory -Path $script:InstallerCacheDir
 }
@@ -186,14 +195,14 @@ function Get-NodeInstallerSpec {
   switch ($architecture) {
     'x64' {
       return [pscustomobject]@{
-        FileName = "node-v$TargetNodePackageVersion-x64.msi"
-        Url = "https://nodejs.org/dist/v$TargetNodePackageVersion/node-v$TargetNodePackageVersion-x64.msi"
+        FileName = "node-v$BootstrapNodePackageVersion-x64.msi"
+        Url = "https://nodejs.org/dist/v$BootstrapNodePackageVersion/node-v$BootstrapNodePackageVersion-x64.msi"
       }
     }
     'arm64' {
       return [pscustomobject]@{
-        FileName = "node-v$TargetNodePackageVersion-arm64.msi"
-        Url = "https://nodejs.org/dist/v$TargetNodePackageVersion/node-v$TargetNodePackageVersion-arm64.msi"
+        FileName = "node-v$BootstrapNodePackageVersion-arm64.msi"
+        Url = "https://nodejs.org/dist/v$BootstrapNodePackageVersion/node-v$BootstrapNodePackageVersion-arm64.msi"
       }
     }
     default {
@@ -207,14 +216,14 @@ function Get-GitInstallerSpec {
   switch ($architecture) {
     'x64' {
       return [pscustomobject]@{
-        FileName = "Git-$TargetGitPackageVersion-64-bit.exe"
-        Url = "https://github.com/git-for-windows/git/releases/download/v$TargetGitPackageVersion.windows.1/Git-$TargetGitPackageVersion-64-bit.exe"
+        FileName = "Git-$BootstrapGitPackageVersion-64-bit.exe"
+        Url = "https://github.com/git-for-windows/git/releases/download/v$BootstrapGitPackageVersion.windows.1/Git-$BootstrapGitPackageVersion-64-bit.exe"
       }
     }
     'arm64' {
       return [pscustomobject]@{
-        FileName = "Git-$TargetGitPackageVersion-arm64.exe"
-        Url = "https://github.com/git-for-windows/git/releases/download/v$TargetGitPackageVersion.windows.1/Git-$TargetGitPackageVersion-arm64.exe"
+        FileName = "Git-$BootstrapGitPackageVersion-arm64.exe"
+        Url = "https://github.com/git-for-windows/git/releases/download/v$BootstrapGitPackageVersion.windows.1/Git-$BootstrapGitPackageVersion-arm64.exe"
       }
     }
     default {
@@ -245,12 +254,12 @@ function Install-NodeFromOfficialPackage {
 
   if ($DryRun) {
     Write-Host "[dry-run] Downloading Node.js installer from $($spec.Url)" -ForegroundColor Yellow
-    Write-Host "[dry-run] Installing Node.js $TargetNodePackageVersion via msiexec" -ForegroundColor Yellow
+    Write-Host "[dry-run] Installing Node.js bootstrap package $BootstrapNodePackageVersion via msiexec" -ForegroundColor Yellow
     return
   }
 
   Download-File -Url $spec.Url -DestinationPath $installerPath
-  Write-Step "Installing Node.js $TargetNodePackageVersion from official installer"
+  Write-Step "Installing Node.js bootstrap package $BootstrapNodePackageVersion from official installer"
   $process = Start-Process -FilePath 'msiexec.exe' -ArgumentList @('/i', $installerPath, '/qn', '/norestart') -Wait -PassThru
   if ($process.ExitCode -ne 0) {
     throw "Node.js installer exited with code $($process.ExitCode)."
@@ -263,12 +272,12 @@ function Install-GitFromOfficialPackage {
 
   if ($DryRun) {
     Write-Host "[dry-run] Downloading Git installer from $($spec.Url)" -ForegroundColor Yellow
-    Write-Host "[dry-run] Installing Git $TargetGitPackageVersion via unattended installer" -ForegroundColor Yellow
+    Write-Host "[dry-run] Installing Git bootstrap package $BootstrapGitPackageVersion via unattended installer" -ForegroundColor Yellow
     return
   }
 
   Download-File -Url $spec.Url -DestinationPath $installerPath
-  Write-Step "Installing Git $TargetGitPackageVersion from official installer"
+  Write-Step "Installing Git bootstrap package $BootstrapGitPackageVersion from official installer"
   $arguments = @('/VERYSILENT', '/NORESTART', '/NOCANCEL', '/SP-', '/CLOSEAPPLICATIONS', '/RESTARTAPPLICATIONS')
   $process = Start-Process -FilePath $installerPath -ArgumentList $arguments -Wait -PassThru
   if ($process.ExitCode -ne 0) {
@@ -276,13 +285,13 @@ function Install-GitFromOfficialPackage {
   }
 }
 
-function Ensure-TargetNodeInstalled {
+function Ensure-MinimumNodeInstalled {
   if (Get-CommandLocation -Name 'winget.exe') {
     try {
       Upgrade-WingetPackage `
         -Id $NodeWingetId `
-        -DisplayName "Node.js $TargetNodePackageVersion (includes npm)" `
-        -PackageVersion $TargetNodePackageVersion
+        -DisplayName 'Node.js (includes npm)' `
+        -PackageVersion $BootstrapNodePackageVersion
       return
     }
     catch {
@@ -296,13 +305,13 @@ function Ensure-TargetNodeInstalled {
   Install-NodeFromOfficialPackage
 }
 
-function Ensure-TargetGitInstalled {
+function Ensure-MinimumGitInstalled {
   if (Get-CommandLocation -Name 'winget.exe') {
     try {
       Upgrade-WingetPackage `
         -Id $GitWingetId `
-        -DisplayName "Git $TargetGitPackageVersion" `
-        -PackageVersion $TargetGitPackageVersion
+        -DisplayName 'Git' `
+        -PackageVersion $BootstrapGitPackageVersion
       return
     }
     catch {
@@ -319,6 +328,11 @@ function Ensure-TargetGitInstalled {
 function Get-CodexMetadata {
   param([string]$NpmCommand)
 
+  if ([string]::IsNullOrWhiteSpace($NpmCommand)) {
+    Write-Info 'npm.cmd is not available, falling back to a safe default Codex requirement.'
+    return Get-DefaultCodexMetadata
+  }
+
   Ensure-NpmCache
 
   try {
@@ -328,12 +342,7 @@ function Get-CodexMetadata {
   }
   catch {
     Write-Info 'Falling back to a safe default Codex requirement because npm registry metadata could not be fetched.'
-    return [pscustomobject]@{
-      version = 'latest'
-      engines = [pscustomobject]@{
-        node = '>=16'
-      }
-    }
+    return Get-DefaultCodexMetadata
   }
 }
 
@@ -369,33 +378,55 @@ function Test-VersionAtLeast {
   return $Current -ge $Minimum
 }
 
+function Ensure-MinimumNpmInstalled {
+  param([string]$NpmCommand)
+
+  if ([string]::IsNullOrWhiteSpace($NpmCommand)) {
+    throw 'npm.cmd was not found while trying to upgrade npm.'
+  }
+
+  Ensure-NpmCache
+
+  Invoke-Checked -Description 'Upgrading npm to meet the minimum version requirement' -Action {
+    & $NpmCommand --cache $script:NpmCacheDir install -g npm@latest
+    if ($LASTEXITCODE -ne 0) {
+      throw 'npm upgrade failed.'
+    }
+  }
+}
+
 function Ensure-NodeToolchain {
   $nodeVersion = Get-ToolVersion -CommandName 'node.exe' -Arguments @('-v')
   $npmVersion = Get-ToolVersion -CommandName 'npm.cmd' -Arguments @('-v')
+  $npmCommand = Get-CommandLocation -Name 'npm.cmd'
+  $codexMeta = Get-CodexMetadata -NpmCommand $npmCommand
+  $codexMinNodeVersion = Get-MinNodeVersionFromRange -Range $codexMeta.engines.node
+  $effectiveMinNodeVersion = $MinNodeVersion
 
-  if ($null -eq $nodeVersion -or $null -eq $npmVersion) {
-    Ensure-TargetNodeInstalled
+  if ($codexMinNodeVersion -gt $effectiveMinNodeVersion) {
+    $effectiveMinNodeVersion = $codexMinNodeVersion
+  }
+
+  if ($null -eq $nodeVersion -or -not (Test-VersionAtLeast -Current $nodeVersion -Minimum $effectiveMinNodeVersion)) {
+    Ensure-MinimumNodeInstalled
     Refresh-CommonToolPaths
     return
   }
 
-  $npmCommand = Get-CommandLocation -Name 'npm.cmd'
-  $codexMeta = Get-CodexMetadata -NpmCommand $npmCommand
-  $codexMinNodeVersion = Get-MinNodeVersionFromRange -Range $codexMeta.engines.node
-
   Write-Info "Detected node version: $nodeVersion"
   Write-Info "Detected npm version:  $npmVersion"
-  Write-Info "Target node version:   $TargetNodeVersion"
+  Write-Info "Minimum node version:  $effectiveMinNodeVersion"
   Write-Info "Codex latest version: $($codexMeta.version)"
   Write-Info "Codex node range:     $($codexMeta.engines.node)"
 
-  $needNodeUpgrade =
-    (-not (Test-VersionAtLeast -Current $nodeVersion -Minimum $codexMinNodeVersion)) -or
-    (-not (Test-VersionAtLeast -Current $nodeVersion -Minimum $TargetNodeVersion)) -or
-    (-not (Test-VersionAtLeast -Current $npmVersion -Minimum $MinNpmVersion))
+  if ($null -eq $npmVersion) {
+    Ensure-MinimumNodeInstalled
+    Refresh-CommonToolPaths
+    return
+  }
 
-  if ($needNodeUpgrade) {
-    Ensure-TargetNodeInstalled
+  if (-not (Test-VersionAtLeast -Current $npmVersion -Minimum $MinNpmVersion)) {
+    Ensure-MinimumNpmInstalled -NpmCommand $npmCommand
     Refresh-CommonToolPaths
   }
 }
@@ -404,16 +435,16 @@ function Ensure-Git {
   $gitVersion = Get-ToolVersion -CommandName 'git.exe' -Arguments @('--version')
 
   if ($null -eq $gitVersion) {
-    Ensure-TargetGitInstalled
+    Ensure-MinimumGitInstalled
     Refresh-CommonToolPaths
     return
   }
 
   Write-Info "Detected git version: $gitVersion"
-  Write-Info "Target git version:   $TargetGitVersion"
+  Write-Info "Minimum git version:  $MinGitVersion"
 
-  if (-not (Test-VersionAtLeast -Current $gitVersion -Minimum $TargetGitVersion)) {
-    Ensure-TargetGitInstalled
+  if (-not (Test-VersionAtLeast -Current $gitVersion -Minimum $MinGitVersion)) {
+    Ensure-MinimumGitInstalled
     Refresh-CommonToolPaths
   }
 }
