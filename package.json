@@ -3,7 +3,11 @@
   "private": true,
   "version": "1.0.0",
   "scripts": {
-    "setup:codex": "powershell -ExecutionPolicy Bypass -File .\\scripts\\bootstrap-codex-cli.ps1",
-    "setup:codex:dry-run": "powershell -ExecutionPolicy Bypass -File .\\scripts\\bootstrap-codex-cli.ps1 -DryRun"
+    "setup:codex": "node ./scripts/run-bootstrap.js",
+    "setup:codex:dry-run": "node ./scripts/run-bootstrap.js --dry-run",
+    "setup:codex:windows": "powershell -ExecutionPolicy Bypass -File .\\scripts\\bootstrap-codex-cli.ps1",
+    "setup:codex:windows:dry-run": "powershell -ExecutionPolicy Bypass -File .\\scripts\\bootstrap-codex-cli.ps1 -DryRun",
+    "setup:codex:macos": "bash ./scripts/bootstrap-codex-cli-macos.sh",
+    "setup:codex:macos:dry-run": "bash ./scripts/bootstrap-codex-cli-macos.sh --dry-run"
   }
 }

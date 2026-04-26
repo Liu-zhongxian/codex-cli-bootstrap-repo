@@ -4,8 +4,8 @@ param(
   [version]$MinGitVersion = [version]'2.53.0',
   [version]$MinNpmVersion = [version]'8.0.0',
   [version]$MinNodeVersion = [version]'22.22.2',
-  [string]$BootstrapNodePackageVersion = '22.22.2',
-  [string]$BootstrapGitPackageVersion = '2.53.0',
+  [string]$BootstrapNodePackageVersion = '',
+  [string]$BootstrapGitPackageVersion = '',
   [string]$NodeWingetId = 'OpenJS.NodeJS.LTS',
   [string]$GitWingetId = 'Git.Git'
 )
@@ -113,6 +113,12 @@ function ConvertTo-Version {
   }
 }
 
+function ConvertTo-VersionString {
+  param([version]$Value)
+
+  return "$($Value.Major).$($Value.Minor).$($Value.Build)"
+}
+
 function Get-ToolVersion {
   param(
     [string]$CommandName,
@@ -192,43 +198,128 @@ function Get-WindowsArchitecture {
 
 function Get-NodeInstallerSpec {
   $architecture = Get-WindowsArchitecture
+  $resolvedVersion = $null
+  $artifactName = $null
+
+  switch ($architecture) {
+    'x64' {
+      $artifactName = 'win-x64-msi'
+    }
+    'arm64' {
+      $artifactName = 'win-arm64-msi'
+    }
+    default {
+      throw "Unsupported Windows architecture for Node.js installer download: $architecture"
+    }
+  }
+
+  if (-not [string]::IsNullOrWhiteSpace($BootstrapNodePackageVersion)) {
+    $resolvedVersion = ConvertTo-Version -Value $BootstrapNodePackageVersion
+  }
+  else {
+    try {
+      $catalog = Invoke-RestMethod -Uri 'https://nodejs.org/dist/index.json'
+      $release = $catalog |
+        Where-Object {
+          $_.lts -and
+          $_.files -contains $artifactName -and
+          (Parse-VersionText -Text $_.version) -ge $MinNodeVersion
+        } |
+        Sort-Object { Parse-VersionText -Text $_.version } -Descending |
+        Select-Object -First 1
+
+      if ($release) {
+        $resolvedVersion = Parse-VersionText -Text $release.version
+      }
+      else {
+        Write-Info "No Node.js LTS installer release met the minimum version requirement. Falling back to $MinNodeVersion."
+      }
+    }
+    catch {
+      Write-Info 'Node.js release metadata could not be fetched. Falling back to the minimum bootstrap version.'
+    }
+  }
+
+  if ($null -eq $resolvedVersion) {
+    $resolvedVersion = $MinNodeVersion
+  }
+
+  $versionText = ConvertTo-VersionString -Value $resolvedVersion
+
   switch ($architecture) {
     'x64' {
       return [pscustomobject]@{
-        FileName = "node-v$BootstrapNodePackageVersion-x64.msi"
-        Url = "https://nodejs.org/dist/v$BootstrapNodePackageVersion/node-v$BootstrapNodePackageVersion-x64.msi"
+        Version = $versionText
+        FileName = "node-v$versionText-x64.msi"
+        Url = "https://nodejs.org/dist/v$versionText/node-v$versionText-x64.msi"
       }
     }
     'arm64' {
       return [pscustomobject]@{
-        FileName = "node-v$BootstrapNodePackageVersion-arm64.msi"
-        Url = "https://nodejs.org/dist/v$BootstrapNodePackageVersion/node-v$BootstrapNodePackageVersion-arm64.msi"
+        Version = $versionText
+        FileName = "node-v$versionText-arm64.msi"
+        Url = "https://nodejs.org/dist/v$versionText/node-v$versionText-arm64.msi"
       }
-    }
-    default {
-      throw "Unsupported Windows architecture for Node.js installer download: $architecture"
     }
   }
 }
 
 function Get-GitInstallerSpec {
   $architecture = Get-WindowsArchitecture
+  $assetSuffix = $null
+
   switch ($architecture) {
     'x64' {
-      return [pscustomobject]@{
-        FileName = "Git-$BootstrapGitPackageVersion-64-bit.exe"
-        Url = "https://github.com/git-for-windows/git/releases/download/v$BootstrapGitPackageVersion.windows.1/Git-$BootstrapGitPackageVersion-64-bit.exe"
-      }
+      $assetSuffix = '64-bit'
     }
     'arm64' {
-      return [pscustomobject]@{
-        FileName = "Git-$BootstrapGitPackageVersion-arm64.exe"
-        Url = "https://github.com/git-for-windows/git/releases/download/v$BootstrapGitPackageVersion.windows.1/Git-$BootstrapGitPackageVersion-arm64.exe"
-      }
+      $assetSuffix = 'arm64'
     }
     default {
       throw "Unsupported Windows architecture for Git installer download: $architecture"
     }
+  }
+
+  if (-not [string]::IsNullOrWhiteSpace($BootstrapGitPackageVersion)) {
+    $versionText = ConvertTo-VersionString -Value (ConvertTo-Version -Value $BootstrapGitPackageVersion)
+    return [pscustomobject]@{
+      Version = $versionText
+      FileName = "Git-$versionText-$assetSuffix.exe"
+      Url = "https://github.com/git-for-windows/git/releases/download/v$versionText.windows.1/Git-$versionText-$assetSuffix.exe"
+    }
+  }
+
+  try {
+    $release = Invoke-RestMethod -Headers @{ 'User-Agent' = 'codex-cli-bootstrap' } -Uri 'https://api.github.com/repos/git-for-windows/git/releases/latest'
+    $asset = $release.assets | Where-Object {
+      $_.name -match "^Git-(\d+\.\d+\.\d+)-$assetSuffix\.exe$"
+    } | Select-Object -First 1
+
+    if ($asset) {
+      $resolvedVersion = Parse-VersionText -Text $asset.name
+      if ($resolvedVersion -ge $MinGitVersion) {
+        return [pscustomobject]@{
+          Version = ConvertTo-VersionString -Value $resolvedVersion
+          FileName = $asset.name
+          Url = $asset.browser_download_url
+        }
+      }
+
+      Write-Info "The latest Git for Windows release found by GitHub was below the minimum version requirement. Falling back to $MinGitVersion."
+    }
+    else {
+      Write-Info 'GitHub release metadata did not include a matching installer asset. Falling back to the minimum bootstrap version.'
+    }
+  }
+  catch {
+    Write-Info 'GitHub release metadata for Git could not be fetched. Falling back to the minimum bootstrap version.'
+  }
+
+  $fallbackVersion = ConvertTo-VersionString -Value $MinGitVersion
+  return [pscustomobject]@{
+    Version = $fallbackVersion
+    FileName = "Git-$fallbackVersion-$assetSuffix.exe"
+    Url = "https://github.com/git-for-windows/git/releases/download/v$fallbackVersion.windows.1/Git-$fallbackVersion-$assetSuffix.exe"
   }
 }
 
@@ -254,12 +345,12 @@ function Install-NodeFromOfficialPackage {
 
   if ($DryRun) {
     Write-Host "[dry-run] Downloading Node.js installer from $($spec.Url)" -ForegroundColor Yellow
-    Write-Host "[dry-run] Installing Node.js bootstrap package $BootstrapNodePackageVersion via msiexec" -ForegroundColor Yellow
+    Write-Host "[dry-run] Installing Node.js bootstrap package $($spec.Version) via msiexec" -ForegroundColor Yellow
     return
   }
 
   Download-File -Url $spec.Url -DestinationPath $installerPath
-  Write-Step "Installing Node.js bootstrap package $BootstrapNodePackageVersion from official installer"
+  Write-Step "Installing Node.js bootstrap package $($spec.Version) from official installer"
   $process = Start-Process -FilePath 'msiexec.exe' -ArgumentList @('/i', $installerPath, '/qn', '/norestart') -Wait -PassThru
   if ($process.ExitCode -ne 0) {
     throw "Node.js installer exited with code $($process.ExitCode)."
@@ -272,12 +363,12 @@ function Install-GitFromOfficialPackage {
 
   if ($DryRun) {
     Write-Host "[dry-run] Downloading Git installer from $($spec.Url)" -ForegroundColor Yellow
-    Write-Host "[dry-run] Installing Git bootstrap package $BootstrapGitPackageVersion via unattended installer" -ForegroundColor Yellow
+    Write-Host "[dry-run] Installing Git bootstrap package $($spec.Version) via unattended installer" -ForegroundColor Yellow
     return
   }
 
   Download-File -Url $spec.Url -DestinationPath $installerPath
-  Write-Step "Installing Git bootstrap package $BootstrapGitPackageVersion from official installer"
+  Write-Step "Installing Git bootstrap package $($spec.Version) from official installer"
   $arguments = @('/VERYSILENT', '/NORESTART', '/NOCANCEL', '/SP-', '/CLOSEAPPLICATIONS', '/RESTARTAPPLICATIONS')
   $process = Start-Process -FilePath $installerPath -ArgumentList $arguments -Wait -PassThru
   if ($process.ExitCode -ne 0) {
