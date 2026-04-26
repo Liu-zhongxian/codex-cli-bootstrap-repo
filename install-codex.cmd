@@ -28,6 +28,35 @@ if /I "%~1"=="--dry-run" (
   goto parse_args
 )
 
+if /I "%~1"=="--skip-git" (
+  set "FORWARDED_ARGS=%FORWARDED_ARGS% -SkipGit"
+  shift
+  goto parse_args
+)
+
+if /I "%~1"=="--skip-node" (
+  set "FORWARDED_ARGS=%FORWARDED_ARGS% -SkipNode"
+  shift
+  goto parse_args
+)
+
+if /I "%~1"=="--skip-npm" (
+  set "FORWARDED_ARGS=%FORWARDED_ARGS% -SkipNpm"
+  shift
+  goto parse_args
+)
+
+if /I "%~1"=="--codex-version" (
+  if "%~2"=="" (
+    echo [error] --codex-version requires a value.
+    exit /b 1
+  )
+  set "FORWARDED_ARGS=%FORWARDED_ARGS% -CodexVersion ""%~2"""
+  shift
+  shift
+  goto parse_args
+)
+
 if /I "%~1"=="-h" goto show_help
 if /I "%~1"=="--help" goto show_help
 if /I "%~1"=="/?" goto show_help
@@ -52,6 +81,9 @@ exit /b %EXIT_CODE%
 echo Usage:
 echo   install-codex.cmd
 echo   install-codex.cmd --dry-run
+echo   install-codex.cmd --skip-git --skip-node --skip-npm
+echo   install-codex.cmd --codex-version latest
+echo   install-codex.cmd --codex-version 0.125.0
 echo.
 echo This launcher runs scripts\bootstrap-codex-cli.ps1 with ExecutionPolicy Bypass.
 exit /b 0

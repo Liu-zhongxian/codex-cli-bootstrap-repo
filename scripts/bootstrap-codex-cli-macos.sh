@@ -3,11 +3,39 @@ set -euo pipefail
 
 DRY_RUN=0
 HOMEBREW_DRY_RUN_ANNOUNCED=0
+SKIP_GIT=0
+SKIP_NODE=0
+SKIP_NPM=0
+CODEX_VERSION="${CODEX_VERSION:-latest}"
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --dry-run)
       DRY_RUN=1
+      shift
+      ;;
+    --skip-git)
+      SKIP_GIT=1
+      shift
+      ;;
+    --skip-node)
+      SKIP_NODE=1
+      shift
+      ;;
+    --skip-npm)
+      SKIP_NPM=1
+      shift
+      ;;
+    --codex-version)
+      if [[ $# -lt 2 ]]; then
+        echo "[error] --codex-version requires a value."
+        exit 1
+      fi
+      CODEX_VERSION="$2"
+      shift 2
+      ;;
+    --codex-version=*)
+      CODEX_VERSION="${1#--codex-version=}"
       shift
       ;;
     *)
@@ -41,8 +69,17 @@ write_info() {
   printf '[info] %s\n' "$1"
 }
 
+write_warning() {
+  printf '[warning] %s\n' "$1"
+}
+
 write_dry_run() {
   printf '[dry-run] %s\n' "$1"
+}
+
+fail() {
+  printf '[error] %s\n' "$1" >&2
+  exit 1
 }
 
 ensure_directory() {
@@ -51,6 +88,13 @@ ensure_directory() {
 
 ensure_npm_cache() {
   ensure_directory "$NPM_CACHE_DIR"
+}
+
+validate_codex_version() {
+  local value="$1"
+  if [[ ! "$value" =~ ^(latest|[0-9]+(\.[0-9]+){0,2})$ ]]; then
+    fail "Unsupported Codex version specifier: $value. Use latest or an exact version like 0.125.0."
+  fi
 }
 
 parse_version_text() {
@@ -125,6 +169,43 @@ get_tool_version() {
   parse_version_text "$output"
 }
 
+get_tool_state() {
+  local command_name="$1"
+  shift
+  local command_path
+  local version
+
+  command_path="$(get_command_location "$command_name")"
+  if [[ -z "$command_path" ]]; then
+    return 1
+  fi
+
+  version="$(get_tool_version "$command_name" "$@")"
+  printf '%s|%s\n' "$command_path" "$version"
+}
+
+assert_tool_state() {
+  local display_name="$1"
+  local tool_path="$2"
+  local tool_version="$3"
+  local minimum_version="$4"
+
+  if [[ -z "$tool_path" ]]; then
+    fail "$display_name was not found on PATH after the installation step."
+  fi
+
+  if [[ -z "$tool_version" ]]; then
+    fail "$display_name was found at $tool_path, but its version could not be determined."
+  fi
+
+  if ! version_ge "$tool_version" "$minimum_version"; then
+    fail "$display_name version $tool_version at $tool_path does not meet the minimum requirement $minimum_version."
+  fi
+
+  write_info "Resolved $display_name path:    $tool_path"
+  write_info "Resolved $display_name version: $tool_version"
+}
+
 refresh_homebrew_path() {
   if [[ -x /opt/homebrew/bin/brew ]]; then
     eval "$(/opt/homebrew/bin/brew shellenv)"
@@ -149,6 +230,18 @@ run_checked() {
   "$@"
 }
 
+is_latest_codex_version() {
+  [[ "$CODEX_VERSION" == "latest" ]]
+}
+
+get_codex_package_spec() {
+  if is_latest_codex_version; then
+    printf '@openai/codex@latest\n'
+  else
+    printf '@openai/codex@%s\n' "$CODEX_VERSION"
+  fi
+}
+
 get_default_codex_metadata() {
   printf 'latest|>=16|16.0.0\n'
 }
@@ -157,6 +250,7 @@ get_codex_metadata() {
   local npm_command
   local raw
   local parsed
+  local package_spec
 
   npm_command="$(get_command_location npm)"
   if [[ -z "$npm_command" ]]; then
@@ -166,8 +260,9 @@ get_codex_metadata() {
   fi
 
   ensure_npm_cache
+  package_spec="$(get_codex_package_spec)"
 
-  if ! raw="$("$npm_command" --cache "$NPM_CACHE_DIR" view @openai/codex version engines --json 2>/dev/null)"; then
+  if ! raw="$("$npm_command" --cache "$NPM_CACHE_DIR" view "$package_spec" version engines --json 2>/dev/null)"; then
     write_info 'Falling back to a safe default Codex requirement because npm registry metadata could not be fetched.'
     get_default_codex_metadata
     return
@@ -212,6 +307,8 @@ ensure_homebrew() {
     return
   fi
 
+  write_warning 'Homebrew is not installed. This bootstrap will install Homebrew system-wide.'
+
   if (( DRY_RUN )); then
     if (( HOMEBREW_DRY_RUN_ANNOUNCED == 0 )); then
       write_dry_run "Installing Homebrew from $HOMEBREW_INSTALL_URL"
@@ -225,8 +322,7 @@ ensure_homebrew() {
   refresh_homebrew_path
 
   if [[ -z "$(get_command_location brew)" ]]; then
-    echo "[error] Homebrew installation completed but brew was not found on PATH."
-    exit 1
+    fail 'Homebrew installation completed but brew was not found on PATH.'
   fi
 }
 
@@ -244,8 +340,7 @@ ensure_brew_package() {
       return
     fi
 
-    echo "[error] brew was not found after the Homebrew installation step."
-    exit 1
+    fail 'brew was not found after the Homebrew installation step.'
   fi
 
   if "$brew_command" list --formula "$formula" >/dev/null 2>&1; then
@@ -267,8 +362,7 @@ ensure_minimum_npm_installed() {
   local npm_command
   npm_command="$(get_command_location npm)"
   if [[ -z "$npm_command" ]]; then
-    echo "[error] npm was not found while trying to upgrade npm."
-    exit 1
+    fail 'npm was not found while trying to upgrade npm.'
   fi
 
   ensure_npm_cache
@@ -277,108 +371,214 @@ ensure_minimum_npm_installed() {
 }
 
 ensure_git() {
-  local git_version
-  git_version="$(get_tool_version git --version)"
+  local git_state=''
+  local git_path=''
+  local git_version=''
 
-  if [[ -z "$git_version" ]]; then
-    write_info "Git is not installed."
-    ensure_minimum_git_installed
-    refresh_homebrew_path
-    return
+  if git_state="$(get_tool_state git --version 2>/dev/null)"; then
+    IFS='|' read -r git_path git_version <<< "$git_state"
   fi
 
-  write_info "Detected git version: $git_version"
-  write_info "Minimum git version:  $MIN_GIT_VERSION"
+  if [[ -z "$git_path" ]]; then
+    if (( SKIP_GIT )); then
+      fail 'Git is required but --skip-git was specified and git was not found.'
+    fi
 
-  if ! version_ge "$git_version" "$MIN_GIT_VERSION"; then
+    write_info 'Git is not installed.'
     ensure_minimum_git_installed
+    if (( DRY_RUN )); then
+      write_dry_run 'Verifying Git command path and version after installation'
+      return
+    fi
     refresh_homebrew_path
+    git_state="$(get_tool_state git --version || true)"
+    IFS='|' read -r git_path git_version <<< "$git_state"
+  elif ! version_ge "$git_version" "$MIN_GIT_VERSION"; then
+    if (( SKIP_GIT )); then
+      fail "Git version $git_version is below the minimum requirement $MIN_GIT_VERSION and --skip-git was specified."
+    fi
+
+    write_info "Detected git version: $git_version"
+    write_info "Minimum git version:  $MIN_GIT_VERSION"
+    ensure_minimum_git_installed
+    if (( DRY_RUN )); then
+      write_dry_run 'Verifying Git command path and version after upgrade'
+      return
+    fi
+    refresh_homebrew_path
+    git_state="$(get_tool_state git --version || true)"
+    IFS='|' read -r git_path git_version <<< "$git_state"
   fi
+
+  assert_tool_state "Git" "$git_path" "$git_version" "$MIN_GIT_VERSION"
 }
 
 ensure_node_toolchain() {
-  local node_version
-  local npm_version
-  local codex_metadata
-  local codex_latest_version
-  local codex_node_range
-  local codex_min_node_version
-  local effective_min_node_version
+  local node_state=''
+  local node_path=''
+  local node_version=''
+  local npm_state=''
+  local npm_path=''
+  local npm_version=''
+  local codex_metadata=''
+  local codex_latest_version=''
+  local codex_node_range=''
+  local codex_min_node_version=''
+  local effective_min_node_version=''
 
-  node_version="$(get_tool_version node -v)"
-  npm_version="$(get_tool_version npm -v)"
   codex_metadata="$(get_codex_metadata)"
   IFS='|' read -r codex_latest_version codex_node_range codex_min_node_version <<< "$codex_metadata"
   effective_min_node_version="$(max_version "$MIN_NODE_VERSION" "$codex_min_node_version")"
 
-  if [[ -z "$node_version" ]]; then
-    write_info "Node.js is not installed."
-    ensure_minimum_node_installed
-    refresh_homebrew_path
-    return
+  if node_state="$(get_tool_state node -v 2>/dev/null)"; then
+    IFS='|' read -r node_path node_version <<< "$node_state"
   fi
 
-  if ! version_ge "$node_version" "$effective_min_node_version"; then
+  if [[ -z "$node_path" ]]; then
+    if (( SKIP_NODE )); then
+      fail 'Node.js is required but --skip-node was specified and node was not found.'
+    fi
+
+    write_info 'Node.js is not installed.'
+    ensure_minimum_node_installed
+    if (( DRY_RUN )); then
+      write_dry_run 'Verifying Node.js and npm command paths and versions after installation'
+      return
+    fi
+    refresh_homebrew_path
+    node_state="$(get_tool_state node -v || true)"
+    IFS='|' read -r node_path node_version <<< "$node_state"
+  elif ! version_ge "$node_version" "$effective_min_node_version"; then
+    if (( SKIP_NODE )); then
+      fail "Node.js version $node_version is below the minimum requirement $effective_min_node_version and --skip-node was specified."
+    fi
+
     write_info "Detected node version: $node_version"
     write_info "Minimum node version:  $effective_min_node_version"
     ensure_minimum_node_installed
+    if (( DRY_RUN )); then
+      write_dry_run 'Verifying Node.js and npm command paths and versions after upgrade'
+      return
+    fi
     refresh_homebrew_path
-    return
+    node_state="$(get_tool_state node -v || true)"
+    IFS='|' read -r node_path node_version <<< "$node_state"
   fi
 
-  write_info "Detected node version: $node_version"
-  write_info "Detected npm version:  ${npm_version:-missing}"
-  write_info "Minimum node version:  $effective_min_node_version"
-  write_info "Codex latest version: $codex_latest_version"
-  write_info "Codex node range:     $codex_node_range"
+  assert_tool_state "Node.js" "$node_path" "$node_version" "$effective_min_node_version"
 
-  if [[ -z "$npm_version" ]]; then
+  if npm_state="$(get_tool_state npm -v 2>/dev/null)"; then
+    IFS='|' read -r npm_path npm_version <<< "$npm_state"
+  fi
+
+  if [[ -z "$npm_path" ]]; then
+    if (( SKIP_NODE || SKIP_NPM )); then
+      fail 'npm was not found after resolving Node.js, and automatic npm repair was disabled by --skip-node or --skip-npm.'
+    fi
+
+    write_info 'npm was not found. Reinstalling Node.js to restore npm.'
     ensure_minimum_node_installed
+    if (( DRY_RUN )); then
+      write_dry_run 'Verifying npm command path and version after the Node.js repair step'
+      return
+    fi
     refresh_homebrew_path
-    return
+    node_state="$(get_tool_state node -v || true)"
+    IFS='|' read -r node_path node_version <<< "$node_state"
+    assert_tool_state "Node.js" "$node_path" "$node_version" "$effective_min_node_version"
+    npm_state="$(get_tool_state npm -v || true)"
+    IFS='|' read -r npm_path npm_version <<< "$npm_state"
+  fi
+
+  if [[ -z "$npm_path" ]]; then
+    fail 'npm was still not found after the Node.js installation step.'
   fi
 
   if ! version_ge "$npm_version" "$MIN_NPM_VERSION"; then
+    if (( SKIP_NPM )); then
+      fail "npm version $npm_version is below the minimum requirement $MIN_NPM_VERSION and --skip-npm was specified."
+    fi
+
     ensure_minimum_npm_installed
+    if (( DRY_RUN )); then
+      write_dry_run 'Verifying npm command path and version after upgrade'
+      return
+    fi
     refresh_homebrew_path
+    npm_state="$(get_tool_state npm -v || true)"
+    IFS='|' read -r npm_path npm_version <<< "$npm_state"
   fi
+
+  assert_tool_state "npm" "$npm_path" "$npm_version" "$MIN_NPM_VERSION"
+  write_info "Requested Codex package: $(get_codex_package_spec)"
+  write_info "Codex latest version:   $codex_latest_version"
+  write_info "Codex node range:       $codex_node_range"
+}
+
+confirm_codex_cli() {
+  local codex_command
+  local codex_version_output
+  local codex_version
+
+  codex_command="$(get_command_location codex)"
+  if [[ -z "$codex_command" ]]; then
+    fail 'Codex CLI installed, but codex was not found on PATH. Open a new terminal and run codex --version.'
+  fi
+
+  if ! codex_version_output="$("$codex_command" --version 2>&1 | tr -d '\r')"; then
+    fail "codex was found at $codex_command but its version command failed."
+  fi
+
+  codex_version="$(parse_version_text "$codex_version_output")"
+  if [[ -z "$codex_version" ]]; then
+    fail "codex was found at $codex_command, but its version output could not be parsed."
+  fi
+
+  if ! is_latest_codex_version && [[ "$(normalize_version "$codex_version")" != "$(normalize_version "$CODEX_VERSION")" ]]; then
+    fail "Codex CLI version $codex_version was installed, but version $CODEX_VERSION was requested."
+  fi
+
+  write_info "Resolved Codex path:    $codex_command"
+  write_info "Resolved Codex version: $codex_version"
+  write_step "Codex CLI is ready: $codex_version_output"
 }
 
 install_codex_cli() {
   local npm_command
-  local codex_command
+  local package_spec
 
   npm_command="$(get_command_location npm)"
+  package_spec="$(get_codex_package_spec)"
+
   if [[ -z "$npm_command" ]]; then
     if (( DRY_RUN )); then
-      write_dry_run "npm is not available yet because the Node.js installation step was only simulated."
-      write_dry_run "Installing the latest @openai/codex globally"
+      write_dry_run 'npm is not available yet because the Node.js installation step was only simulated.'
+      write_dry_run "Installing $package_spec globally"
+      write_dry_run 'Verifying codex on PATH after installation'
       return
     fi
 
-    echo "[error] npm was not found after the Node.js installation step."
-    exit 1
+    fail 'npm was not found after the Node.js installation step.'
   fi
 
   ensure_npm_cache
-  run_checked "Installing the latest @openai/codex globally" \
-    "$npm_command" --cache "$NPM_CACHE_DIR" install -g @openai/codex@latest
+  run_checked "Installing $package_spec globally" \
+    "$npm_command" --cache "$NPM_CACHE_DIR" install -g "$package_spec"
 
   if (( DRY_RUN )); then
+    write_dry_run 'Verifying codex on PATH after installation'
     return
   fi
 
   hash -r
-  codex_command="$(get_command_location codex)"
-  if [[ -z "$codex_command" ]]; then
-    echo "[error] Codex CLI installed, but codex was not found on PATH. Open a new terminal and run codex --version."
-    exit 1
-  fi
-
-  write_step "Codex CLI is ready: $("$codex_command" --version 2>&1 | tr -d '\r')"
+  confirm_codex_cli
 }
 
+validate_codex_version "$CODEX_VERSION"
+
 write_step "Checking Git, Node.js, npm, and Codex CLI requirements"
+write_warning 'This bootstrap may install or upgrade system Git, Node.js, and npm.'
+write_warning 'If Homebrew is missing, this bootstrap will install Homebrew automatically.'
 refresh_homebrew_path
 ensure_git
 ensure_node_toolchain

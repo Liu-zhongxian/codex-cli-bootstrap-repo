@@ -5,12 +5,54 @@ const repoRoot = path.resolve(__dirname, "..");
 const args = process.argv.slice(2);
 
 function mapWindowsArgs(values) {
-  return values.map((value) => {
+  const mapped = [];
+
+  for (let index = 0; index < values.length; index += 1) {
+    const value = values[index];
+
     if (value === "--dry-run") {
-      return "-DryRun";
+      mapped.push("-DryRun");
+      continue;
     }
-    return value;
-  });
+
+    if (value === "--skip-git") {
+      mapped.push("-SkipGit");
+      continue;
+    }
+
+    if (value === "--skip-node") {
+      mapped.push("-SkipNode");
+      continue;
+    }
+
+    if (value === "--skip-npm") {
+      mapped.push("-SkipNpm");
+      continue;
+    }
+
+    if (value === "--codex-version") {
+      const version = values[index + 1];
+      if (!version) {
+        throw new Error("--codex-version requires a value");
+      }
+      mapped.push("-CodexVersion", version);
+      index += 1;
+      continue;
+    }
+
+    if (value.startsWith("--codex-version=")) {
+      const version = value.slice("--codex-version=".length);
+      if (!version) {
+        throw new Error("--codex-version requires a value");
+      }
+      mapped.push("-CodexVersion", version);
+      continue;
+    }
+
+    mapped.push(value);
+  }
+
+  return mapped;
 }
 
 function run(command, commandArgs) {

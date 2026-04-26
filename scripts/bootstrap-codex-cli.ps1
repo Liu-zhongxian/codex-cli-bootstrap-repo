@@ -1,6 +1,11 @@
 [CmdletBinding()]
 param(
   [switch]$DryRun,
+  [switch]$SkipGit,
+  [switch]$SkipNode,
+  [switch]$SkipNpm,
+  [ValidatePattern('^(latest|\d+(\.\d+){0,2})$')]
+  [string]$CodexVersion = 'latest',
   [version]$MinGitVersion = [version]'2.53.0',
   [version]$MinNpmVersion = [version]'8.0.0',
   [version]$MinNodeVersion = [version]'22.22.2',
@@ -26,6 +31,11 @@ function Write-Step {
 function Write-Info {
   param([string]$Message)
   Write-Host "[info] $Message" -ForegroundColor DarkGray
+}
+
+function Write-WarningText {
+  param([string]$Message)
+  Write-Host "[warning] $Message" -ForegroundColor Yellow
 }
 
 function Invoke-Checked {
@@ -119,6 +129,16 @@ function ConvertTo-VersionString {
   return "$($Value.Major).$($Value.Minor).$($Value.Build)"
 }
 
+function Normalize-Sha256 {
+  param([string]$Value)
+
+  if ([string]::IsNullOrWhiteSpace($Value)) {
+    return $null
+  }
+
+  return $Value.Replace('sha256:', '').Trim().ToLowerInvariant()
+}
+
 function Get-ToolVersion {
   param(
     [string]$CommandName,
@@ -139,44 +159,74 @@ function Get-ToolVersion {
   }
 }
 
-function Upgrade-WingetPackage {
+function Get-ToolState {
   param(
-    [string]$Id,
-    [string]$DisplayName,
-    [string]$PackageVersion
+    [string]$CommandName,
+    [string[]]$Arguments
   )
 
-  $versionSuffix = ''
-  if (-not [string]::IsNullOrWhiteSpace($PackageVersion)) {
-    $versionSuffix = " to version $PackageVersion"
+  $commandPath = Get-CommandLocation -Name $CommandName
+  if (-not $commandPath) {
+    return $null
   }
 
-  Invoke-Checked -Description "Installing or upgrading $DisplayName$versionSuffix via winget" -Action {
-    $arguments = @(
-      'install'
-      '--id', $Id
-      '--exact'
-      '--silent'
-      '--accept-package-agreements'
-      '--accept-source-agreements'
-      '--source', 'winget'
-      '--disable-interactivity'
-      '--force'
-    )
-
-    if (-not [string]::IsNullOrWhiteSpace($PackageVersion)) {
-      $arguments += @('--version', $PackageVersion)
-    }
-
-    winget.exe @arguments
-    if ($LASTEXITCODE -ne 0) {
-      throw "winget install/upgrade failed for $DisplayName."
-    }
+  return [pscustomobject]@{
+    Path = $commandPath
+    Version = Get-ToolVersion -CommandName $CommandName -Arguments $Arguments
   }
+}
+
+function Assert-ToolState {
+  param(
+    [string]$DisplayName,
+    [pscustomobject]$State,
+    [version]$MinimumVersion
+  )
+
+  if ($null -eq $State -or [string]::IsNullOrWhiteSpace($State.Path)) {
+    throw "$DisplayName was not found on PATH after the installation step."
+  }
+
+  if ($null -eq $State.Version) {
+    throw "$DisplayName was found at $($State.Path), but its version could not be determined."
+  }
+
+  if ($State.Version -lt $MinimumVersion) {
+    throw "$DisplayName version $($State.Version) at $($State.Path) does not meet the minimum requirement $MinimumVersion."
+  }
+
+  Write-Info "Resolved $DisplayName path:    $($State.Path)"
+  Write-Info "Resolved $DisplayName version: $($State.Version)"
+  return $State
+}
+
+function Get-CodexPackageSpec {
+  if ($CodexVersion -eq 'latest') {
+    return '@openai/codex@latest'
+  }
+
+  return "@openai/codex@$CodexVersion"
+}
+
+function Test-VersionAtLeast {
+  param(
+    [version]$Current,
+    [version]$Minimum
+  )
+
+  if ($null -eq $Current) {
+    return $false
+  }
+
+  return $Current -ge $Minimum
 }
 
 function Ensure-NpmCache {
   Ensure-Directory -Path $script:NpmCacheDir
+}
+
+function Ensure-InstallerCache {
+  Ensure-Directory -Path $script:InstallerCacheDir
 }
 
 function Get-DefaultCodexMetadata {
@@ -188,12 +238,72 @@ function Get-DefaultCodexMetadata {
   }
 }
 
-function Ensure-InstallerCache {
-  Ensure-Directory -Path $script:InstallerCacheDir
+function Get-CodexMetadata {
+  param([string]$NpmCommand)
+
+  if ([string]::IsNullOrWhiteSpace($NpmCommand)) {
+    Write-Info 'npm.cmd is not available, falling back to a safe default Codex requirement.'
+    return Get-DefaultCodexMetadata
+  }
+
+  Ensure-NpmCache
+  $packageSpec = Get-CodexPackageSpec
+
+  try {
+    $raw = & $NpmCommand --cache $script:NpmCacheDir view $packageSpec version engines --json 2>&1
+    $json = $raw | Out-String | ConvertFrom-Json
+    return $json
+  }
+  catch {
+    Write-Info 'Falling back to a safe default Codex requirement because npm registry metadata could not be fetched.'
+    return Get-DefaultCodexMetadata
+  }
+}
+
+function Get-MinNodeVersionFromRange {
+  param([string]$Range)
+
+  if ([string]::IsNullOrWhiteSpace($Range)) {
+    return [version]'16.0.0'
+  }
+
+  $matches = [regex]::Matches($Range, '>=\s*(\d+(?:\.\d+){0,2})')
+  if ($matches.Count -eq 0) {
+    return [version]'16.0.0'
+  }
+
+  $versions = foreach ($match in $matches) {
+    ConvertTo-Version -Value $match.Groups[1].Value
+  }
+
+  return ($versions | Sort-Object | Select-Object -First 1)
 }
 
 function Get-WindowsArchitecture {
-  return [System.Runtime.InteropServices.RuntimeInformation]::OSArchitecture.ToString().ToLowerInvariant()
+  try {
+    $runtimeInfoType = [System.Runtime.InteropServices.RuntimeInformation]
+    $architectureProperty = $runtimeInfoType.GetProperty('OSArchitecture')
+    if ($null -ne $architectureProperty) {
+      return $architectureProperty.GetValue($null, @()).ToString().ToLowerInvariant()
+    }
+  }
+  catch {
+  }
+
+  $candidates = @(
+    $env:PROCESSOR_ARCHITEW6432
+    $env:PROCESSOR_ARCHITECTURE
+  ) | Where-Object { -not [string]::IsNullOrWhiteSpace($_) }
+
+  foreach ($candidate in $candidates) {
+    switch ($candidate.ToUpperInvariant()) {
+      'ARM64' { return 'arm64' }
+      'AMD64' { return 'x64' }
+      'X86' { return 'x86' }
+    }
+  }
+
+  throw 'Windows architecture could not be determined.'
 }
 
 function Get-NodeInstallerSpec {
@@ -252,6 +362,7 @@ function Get-NodeInstallerSpec {
         Version = $versionText
         FileName = "node-v$versionText-x64.msi"
         Url = "https://nodejs.org/dist/v$versionText/node-v$versionText-x64.msi"
+        Sha256ManifestUrl = "https://nodejs.org/dist/v$versionText/SHASUMS256.txt"
       }
     }
     'arm64' {
@@ -259,14 +370,52 @@ function Get-NodeInstallerSpec {
         Version = $versionText
         FileName = "node-v$versionText-arm64.msi"
         Url = "https://nodejs.org/dist/v$versionText/node-v$versionText-arm64.msi"
+        Sha256ManifestUrl = "https://nodejs.org/dist/v$versionText/SHASUMS256.txt"
       }
     }
+  }
+}
+
+function Get-GitDigestFromReleaseBody {
+  param(
+    [string]$Body,
+    [string]$FileName
+  )
+
+  if ([string]::IsNullOrWhiteSpace($Body)) {
+    return $null
+  }
+
+  $pattern = "(?im)^" + [regex]::Escape($FileName) + "\s*\|\s*([a-f0-9]{64})\s*$"
+  $match = [regex]::Match($Body, $pattern)
+  if (-not $match.Success) {
+    return $null
+  }
+
+  return Normalize-Sha256 -Value $match.Groups[1].Value
+}
+
+function Get-GitReleaseMetadata {
+  param([string]$PackageVersion)
+
+  $uri = 'https://api.github.com/repos/git-for-windows/git/releases/latest'
+  if (-not [string]::IsNullOrWhiteSpace($PackageVersion)) {
+    $uri = "https://api.github.com/repos/git-for-windows/git/releases/tags/v$PackageVersion.windows.1"
+  }
+
+  try {
+    return Invoke-RestMethod -Headers @{ 'User-Agent' = 'codex-cli-bootstrap' } -Uri $uri
+  }
+  catch {
+    throw "Git release metadata could not be fetched from GitHub. Refusing to download an unverified installer. $($_.Exception.Message)"
   }
 }
 
 function Get-GitInstallerSpec {
   $architecture = Get-WindowsArchitecture
   $assetSuffix = $null
+  $fallbackVersionText = ConvertTo-VersionString -Value $MinGitVersion
+  $releaseVersionRequest = $BootstrapGitPackageVersion
 
   switch ($architecture) {
     'x64' {
@@ -280,46 +429,46 @@ function Get-GitInstallerSpec {
     }
   }
 
-  if (-not [string]::IsNullOrWhiteSpace($BootstrapGitPackageVersion)) {
-    $versionText = ConvertTo-VersionString -Value (ConvertTo-Version -Value $BootstrapGitPackageVersion)
-    return [pscustomobject]@{
-      Version = $versionText
-      FileName = "Git-$versionText-$assetSuffix.exe"
-      Url = "https://github.com/git-for-windows/git/releases/download/v$versionText.windows.1/Git-$versionText-$assetSuffix.exe"
-    }
-  }
+  $release = Get-GitReleaseMetadata -PackageVersion $releaseVersionRequest
+  $asset = $release.assets | Where-Object {
+    $_.name -match "^Git-(\d+\.\d+\.\d+)-$assetSuffix\.exe$"
+  } | Select-Object -First 1
 
-  try {
-    $release = Invoke-RestMethod -Headers @{ 'User-Agent' = 'codex-cli-bootstrap' } -Uri 'https://api.github.com/repos/git-for-windows/git/releases/latest'
+  if ($null -eq $asset -and [string]::IsNullOrWhiteSpace($releaseVersionRequest)) {
+    Write-Info "The latest Git release metadata did not include a matching installer asset. Falling back to the minimum bootstrap version $fallbackVersionText."
+    $release = Get-GitReleaseMetadata -PackageVersion $fallbackVersionText
     $asset = $release.assets | Where-Object {
-      $_.name -match "^Git-(\d+\.\d+\.\d+)-$assetSuffix\.exe$"
+      $_.name -eq "Git-$fallbackVersionText-$assetSuffix.exe"
     } | Select-Object -First 1
-
-    if ($asset) {
-      $resolvedVersion = Parse-VersionText -Text $asset.name
-      if ($resolvedVersion -ge $MinGitVersion) {
-        return [pscustomobject]@{
-          Version = ConvertTo-VersionString -Value $resolvedVersion
-          FileName = $asset.name
-          Url = $asset.browser_download_url
-        }
-      }
-
-      Write-Info "The latest Git for Windows release found by GitHub was below the minimum version requirement. Falling back to $MinGitVersion."
-    }
-    else {
-      Write-Info 'GitHub release metadata did not include a matching installer asset. Falling back to the minimum bootstrap version.'
-    }
-  }
-  catch {
-    Write-Info 'GitHub release metadata for Git could not be fetched. Falling back to the minimum bootstrap version.'
   }
 
-  $fallbackVersion = ConvertTo-VersionString -Value $MinGitVersion
+  if ($null -eq $asset) {
+    throw 'Git release metadata did not include a matching installer asset for this architecture.'
+  }
+
+  $resolvedVersion = Parse-VersionText -Text $asset.name
+  if ($resolvedVersion -lt $MinGitVersion) {
+    throw "Git installer release $resolvedVersion is below the minimum required version $MinGitVersion."
+  }
+
+  $digest = $null
+  if ($asset.PSObject.Properties.Name -contains 'digest') {
+    $digest = Normalize-Sha256 -Value $asset.digest
+  }
+
+  if (-not $digest) {
+    $digest = Get-GitDigestFromReleaseBody -Body $release.body -FileName $asset.name
+  }
+
+  if (-not $digest) {
+    throw "Git checksum metadata was not found for $($asset.name). Refusing to download an unverified installer."
+  }
+
   return [pscustomobject]@{
-    Version = $fallbackVersion
-    FileName = "Git-$fallbackVersion-$assetSuffix.exe"
-    Url = "https://github.com/git-for-windows/git/releases/download/v$fallbackVersion.windows.1/Git-$fallbackVersion-$assetSuffix.exe"
+    Version = ConvertTo-VersionString -Value $resolvedVersion
+    FileName = $asset.name
+    Url = $asset.browser_download_url
+    Sha256 = $digest
   }
 }
 
@@ -339,17 +488,109 @@ function Download-File {
   Invoke-WebRequest -Uri $Url -OutFile $DestinationPath
 }
 
+function Get-NodeInstallerSha256 {
+  param([pscustomobject]$Spec)
+
+  $manifest = Invoke-WebRequest -Uri $Spec.Sha256ManifestUrl -UseBasicParsing
+  $pattern = "(?im)^([a-f0-9]{64})\s+" + [regex]::Escape($Spec.FileName) + "$"
+  $match = [regex]::Match($manifest.Content, $pattern)
+  if (-not $match.Success) {
+    throw "The Node.js checksum manifest did not contain an entry for $($Spec.FileName)."
+  }
+
+  return Normalize-Sha256 -Value $match.Groups[1].Value
+}
+
+function Assert-FileSha256 {
+  param(
+    [string]$FilePath,
+    [string]$ExpectedSha256,
+    [string]$DisplayName
+  )
+
+  $actualHash = (Get-FileHash -LiteralPath $FilePath -Algorithm SHA256).Hash.ToLowerInvariant()
+  $expectedHash = Normalize-Sha256 -Value $ExpectedSha256
+
+  if ([string]::IsNullOrWhiteSpace($expectedHash)) {
+    throw "An expected SHA256 checksum was not provided for $DisplayName."
+  }
+
+  if ($actualHash -ne $expectedHash) {
+    throw "$DisplayName failed SHA256 verification. Expected $expectedHash but got $actualHash."
+  }
+
+  Write-Info "Validated SHA256 for ${DisplayName}: $actualHash"
+}
+
+function Write-AuthenticodeSignatureInfo {
+  param(
+    [string]$FilePath,
+    [string]$DisplayName
+  )
+
+  try {
+    $signature = Get-AuthenticodeSignature -FilePath $FilePath
+    if ($null -ne $signature -and $null -ne $signature.SignerCertificate) {
+      Write-Info "Authenticode signer for ${DisplayName}: $($signature.SignerCertificate.Subject)"
+      Write-Info "Authenticode status for ${DisplayName}: $($signature.Status)"
+    }
+  }
+  catch {
+    Write-WarningText "Could not read the Authenticode signature for $DisplayName. SHA256 verification already succeeded."
+  }
+}
+
+function Upgrade-WingetPackage {
+  param(
+    [string]$Id,
+    [string]$DisplayName,
+    [string]$PackageVersion
+  )
+
+  $versionSuffix = ''
+  if (-not [string]::IsNullOrWhiteSpace($PackageVersion)) {
+    $versionSuffix = " to version $PackageVersion"
+  }
+
+  Invoke-Checked -Description "Installing or upgrading $DisplayName$versionSuffix via winget" -Action {
+    $arguments = @(
+      'install'
+      '--id', $Id
+      '--exact'
+      '--silent'
+      '--accept-package-agreements'
+      '--accept-source-agreements'
+      '--source', 'winget'
+      '--disable-interactivity'
+      '--force'
+    )
+
+    if (-not [string]::IsNullOrWhiteSpace($PackageVersion)) {
+      $arguments += @('--version', $PackageVersion)
+    }
+
+    winget.exe @arguments
+    if ($LASTEXITCODE -ne 0) {
+      throw "winget install/upgrade failed for $DisplayName."
+    }
+  }
+}
+
 function Install-NodeFromOfficialPackage {
   $spec = Get-NodeInstallerSpec
   $installerPath = Join-Path $script:InstallerCacheDir $spec.FileName
 
   if ($DryRun) {
     Write-Host "[dry-run] Downloading Node.js installer from $($spec.Url)" -ForegroundColor Yellow
+    Write-Host "[dry-run] Validating the downloaded Node.js installer with SHA256 from $($spec.Sha256ManifestUrl)" -ForegroundColor Yellow
     Write-Host "[dry-run] Installing Node.js bootstrap package $($spec.Version) via msiexec" -ForegroundColor Yellow
     return
   }
 
   Download-File -Url $spec.Url -DestinationPath $installerPath
+  $expectedHash = Get-NodeInstallerSha256 -Spec $spec
+  Assert-FileSha256 -FilePath $installerPath -ExpectedSha256 $expectedHash -DisplayName "Node.js installer $($spec.FileName)"
+  Write-AuthenticodeSignatureInfo -FilePath $installerPath -DisplayName "Node.js installer $($spec.FileName)"
   Write-Step "Installing Node.js bootstrap package $($spec.Version) from official installer"
   $process = Start-Process -FilePath 'msiexec.exe' -ArgumentList @('/i', $installerPath, '/qn', '/norestart') -Wait -PassThru
   if ($process.ExitCode -ne 0) {
@@ -363,11 +604,14 @@ function Install-GitFromOfficialPackage {
 
   if ($DryRun) {
     Write-Host "[dry-run] Downloading Git installer from $($spec.Url)" -ForegroundColor Yellow
+    Write-Host "[dry-run] Validating the downloaded Git installer with SHA256 $($spec.Sha256)" -ForegroundColor Yellow
     Write-Host "[dry-run] Installing Git bootstrap package $($spec.Version) via unattended installer" -ForegroundColor Yellow
     return
   }
 
   Download-File -Url $spec.Url -DestinationPath $installerPath
+  Assert-FileSha256 -FilePath $installerPath -ExpectedSha256 $spec.Sha256 -DisplayName "Git installer $($spec.FileName)"
+  Write-AuthenticodeSignatureInfo -FilePath $installerPath -DisplayName "Git installer $($spec.FileName)"
   Write-Step "Installing Git bootstrap package $($spec.Version) from official installer"
   $arguments = @('/VERYSILENT', '/NORESTART', '/NOCANCEL', '/SP-', '/CLOSEAPPLICATIONS', '/RESTARTAPPLICATIONS')
   $process = Start-Process -FilePath $installerPath -ArgumentList $arguments -Wait -PassThru
@@ -416,59 +660,6 @@ function Ensure-MinimumGitInstalled {
   Install-GitFromOfficialPackage
 }
 
-function Get-CodexMetadata {
-  param([string]$NpmCommand)
-
-  if ([string]::IsNullOrWhiteSpace($NpmCommand)) {
-    Write-Info 'npm.cmd is not available, falling back to a safe default Codex requirement.'
-    return Get-DefaultCodexMetadata
-  }
-
-  Ensure-NpmCache
-
-  try {
-    $raw = & $NpmCommand --cache $script:NpmCacheDir view @openai/codex version engines --json 2>&1
-    $json = $raw | Out-String | ConvertFrom-Json
-    return $json
-  }
-  catch {
-    Write-Info 'Falling back to a safe default Codex requirement because npm registry metadata could not be fetched.'
-    return Get-DefaultCodexMetadata
-  }
-}
-
-function Get-MinNodeVersionFromRange {
-  param([string]$Range)
-
-  if ([string]::IsNullOrWhiteSpace($Range)) {
-    return [version]'16.0.0'
-  }
-
-  $matches = [regex]::Matches($Range, '>=\s*(\d+(?:\.\d+){0,2})')
-  if ($matches.Count -eq 0) {
-    return [version]'16.0.0'
-  }
-
-  $versions = foreach ($match in $matches) {
-    ConvertTo-Version -Value $match.Groups[1].Value
-  }
-
-  return ($versions | Sort-Object | Select-Object -First 1)
-}
-
-function Test-VersionAtLeast {
-  param(
-    [version]$Current,
-    [version]$Minimum
-  )
-
-  if ($null -eq $Current) {
-    return $false
-  }
-
-  return $Current -ge $Minimum
-}
-
 function Ensure-MinimumNpmInstalled {
   param([string]$NpmCommand)
 
@@ -486,9 +677,43 @@ function Ensure-MinimumNpmInstalled {
   }
 }
 
+function Ensure-Git {
+  $gitState = Get-ToolState -CommandName 'git.exe' -Arguments @('--version')
+
+  if ($null -eq $gitState) {
+    if ($SkipGit) {
+      throw "Git is required but --skip-git was specified and git.exe was not found."
+    }
+
+    Write-Info 'Git is not installed.'
+    Ensure-MinimumGitInstalled
+    if ($DryRun) {
+      Write-Host '[dry-run] Verifying Git command path and version after installation' -ForegroundColor Yellow
+      return $null
+    }
+    Refresh-CommonToolPaths
+    $gitState = Get-ToolState -CommandName 'git.exe' -Arguments @('--version')
+  }
+  elseif (-not (Test-VersionAtLeast -Current $gitState.Version -Minimum $MinGitVersion)) {
+    if ($SkipGit) {
+      throw "Git version $($gitState.Version) is below the minimum requirement $MinGitVersion and --skip-git was specified."
+    }
+
+    Write-Info "Detected git version: $($gitState.Version)"
+    Write-Info "Minimum git version:  $MinGitVersion"
+    Ensure-MinimumGitInstalled
+    if ($DryRun) {
+      Write-Host '[dry-run] Verifying Git command path and version after upgrade' -ForegroundColor Yellow
+      return $null
+    }
+    Refresh-CommonToolPaths
+    $gitState = Get-ToolState -CommandName 'git.exe' -Arguments @('--version')
+  }
+
+  return Assert-ToolState -DisplayName 'Git' -State $gitState -MinimumVersion $MinGitVersion
+}
+
 function Ensure-NodeToolchain {
-  $nodeVersion = Get-ToolVersion -CommandName 'node.exe' -Arguments @('-v')
-  $npmVersion = Get-ToolVersion -CommandName 'npm.cmd' -Arguments @('-v')
   $npmCommand = Get-CommandLocation -Name 'npm.cmd'
   $codexMeta = Get-CodexMetadata -NpmCommand $npmCommand
   $codexMinNodeVersion = Get-MinNodeVersionFromRange -Range $codexMeta.engines.node
@@ -498,45 +723,84 @@ function Ensure-NodeToolchain {
     $effectiveMinNodeVersion = $codexMinNodeVersion
   }
 
-  if ($null -eq $nodeVersion -or -not (Test-VersionAtLeast -Current $nodeVersion -Minimum $effectiveMinNodeVersion)) {
+  $nodeState = Get-ToolState -CommandName 'node.exe' -Arguments @('-v')
+  if ($null -eq $nodeState) {
+    if ($SkipNode) {
+      throw "Node.js is required but --skip-node was specified and node.exe was not found."
+    }
+
+    Write-Info 'Node.js is not installed.'
     Ensure-MinimumNodeInstalled
+    if ($DryRun) {
+      Write-Host '[dry-run] Verifying Node.js and npm command paths and versions after installation' -ForegroundColor Yellow
+      return $null
+    }
     Refresh-CommonToolPaths
-    return
+    $nodeState = Get-ToolState -CommandName 'node.exe' -Arguments @('-v')
   }
+  elseif (-not (Test-VersionAtLeast -Current $nodeState.Version -Minimum $effectiveMinNodeVersion)) {
+    if ($SkipNode) {
+      throw "Node.js version $($nodeState.Version) is below the minimum requirement $effectiveMinNodeVersion and --skip-node was specified."
+    }
 
-  Write-Info "Detected node version: $nodeVersion"
-  Write-Info "Detected npm version:  $npmVersion"
-  Write-Info "Minimum node version:  $effectiveMinNodeVersion"
-  Write-Info "Codex latest version: $($codexMeta.version)"
-  Write-Info "Codex node range:     $($codexMeta.engines.node)"
-
-  if ($null -eq $npmVersion) {
+    Write-Info "Detected node version: $($nodeState.Version)"
+    Write-Info "Minimum node version:  $effectiveMinNodeVersion"
     Ensure-MinimumNodeInstalled
+    if ($DryRun) {
+      Write-Host '[dry-run] Verifying Node.js and npm command paths and versions after upgrade' -ForegroundColor Yellow
+      return $null
+    }
     Refresh-CommonToolPaths
-    return
+    $nodeState = Get-ToolState -CommandName 'node.exe' -Arguments @('-v')
   }
 
-  if (-not (Test-VersionAtLeast -Current $npmVersion -Minimum $MinNpmVersion)) {
-    Ensure-MinimumNpmInstalled -NpmCommand $npmCommand
+  $nodeState = Assert-ToolState -DisplayName 'Node.js' -State $nodeState -MinimumVersion $effectiveMinNodeVersion
+
+  $npmState = Get-ToolState -CommandName 'npm.cmd' -Arguments @('-v')
+  if ($null -eq $npmState) {
+    if ($SkipNode -or $SkipNpm) {
+      throw 'npm.cmd was not found after resolving Node.js, and automatic npm repair was disabled by --skip-node or --skip-npm.'
+    }
+
+    Write-Info 'npm.cmd was not found. Reinstalling Node.js to restore npm.'
+    Ensure-MinimumNodeInstalled
+    if ($DryRun) {
+      Write-Host '[dry-run] Verifying npm command path and version after the Node.js repair step' -ForegroundColor Yellow
+      return $null
+    }
     Refresh-CommonToolPaths
+    $nodeState = Assert-ToolState -DisplayName 'Node.js' -State (Get-ToolState -CommandName 'node.exe' -Arguments @('-v')) -MinimumVersion $effectiveMinNodeVersion
+    $npmState = Get-ToolState -CommandName 'npm.cmd' -Arguments @('-v')
   }
-}
 
-function Ensure-Git {
-  $gitVersion = Get-ToolVersion -CommandName 'git.exe' -Arguments @('--version')
-
-  if ($null -eq $gitVersion) {
-    Ensure-MinimumGitInstalled
-    Refresh-CommonToolPaths
-    return
+  if ($null -eq $npmState) {
+    throw 'npm.cmd was still not found after the Node.js installation step.'
   }
 
-  Write-Info "Detected git version: $gitVersion"
-  Write-Info "Minimum git version:  $MinGitVersion"
+  if (-not (Test-VersionAtLeast -Current $npmState.Version -Minimum $MinNpmVersion)) {
+    if ($SkipNpm) {
+      throw "npm version $($npmState.Version) is below the minimum requirement $MinNpmVersion and --skip-npm was specified."
+    }
 
-  if (-not (Test-VersionAtLeast -Current $gitVersion -Minimum $MinGitVersion)) {
-    Ensure-MinimumGitInstalled
+    Ensure-MinimumNpmInstalled -NpmCommand $npmState.Path
+    if ($DryRun) {
+      Write-Host '[dry-run] Verifying npm command path and version after upgrade' -ForegroundColor Yellow
+      return $null
+    }
     Refresh-CommonToolPaths
+    $npmState = Get-ToolState -CommandName 'npm.cmd' -Arguments @('-v')
+  }
+
+  $npmState = Assert-ToolState -DisplayName 'npm' -State $npmState -MinimumVersion $MinNpmVersion
+
+  Write-Info "Requested Codex package: $(Get-CodexPackageSpec)"
+  Write-Info "Codex latest version:   $($codexMeta.version)"
+  Write-Info "Codex node range:       $($codexMeta.engines.node)"
+
+  return [pscustomobject]@{
+    Node = $nodeState
+    Npm = $npmState
+    Codex = $codexMeta
   }
 }
 
@@ -555,30 +819,7 @@ function Ensure-UserNpmBinOnPath {
   Ensure-PathEntry -Entry $npmBin
 }
 
-function Install-CodexCli {
-  Ensure-UserNpmBinOnPath
-
-  $npmCommand = Get-CommandLocation -Name 'npm.cmd'
-  if (-not $npmCommand) {
-    if ($DryRun) {
-      Write-Host '[dry-run] npm.cmd is not available yet because the Node.js installation step was only simulated.' -ForegroundColor Yellow
-      Write-Host '[dry-run] Installing the latest @openai/codex globally' -ForegroundColor Yellow
-      return
-    }
-
-    throw 'npm.cmd was not found after the Node.js installation step.'
-  }
-
-  Ensure-NpmCache
-
-  Invoke-Checked -Description 'Installing the latest @openai/codex globally' -Action {
-    & $npmCommand --cache $script:NpmCacheDir install -g @openai/codex@latest --prefix (Join-Path $env:APPDATA 'npm')
-  }
-
-  if ($DryRun) {
-    return
-  }
-
+function Confirm-CodexCli {
   $codexCommand = Get-CommandLocation -Name 'codex.cmd'
   if (-not $codexCommand) {
     $codexCommand = Get-CommandLocation -Name 'codex'
@@ -588,13 +829,63 @@ function Install-CodexCli {
     throw 'Codex CLI installed, but codex was not found on PATH. Open a new terminal and run codex --version.'
   }
 
-  $codexVersion = & $codexCommand --version 2>&1 | Out-String
-  Write-Step "Codex CLI is ready: $($codexVersion.Trim())"
+  $codexVersionOutput = & $codexCommand --version 2>&1 | Out-String
+  $resolvedVersion = Parse-VersionText -Text $codexVersionOutput
+  if ($null -eq $resolvedVersion) {
+    throw "codex was found at $codexCommand, but its version output could not be parsed."
+  }
+
+  if ($CodexVersion -ne 'latest') {
+    $expectedVersion = ConvertTo-Version -Value $CodexVersion
+    if ($resolvedVersion -ne $expectedVersion) {
+      throw "Codex CLI version $resolvedVersion was installed, but version $expectedVersion was requested."
+    }
+  }
+
+  Write-Info "Resolved Codex path:    $codexCommand"
+  Write-Info "Resolved Codex version: $resolvedVersion"
+  Write-Step "Codex CLI is ready: $($codexVersionOutput.Trim())"
+}
+
+function Install-CodexCli {
+  Ensure-UserNpmBinOnPath
+
+  $npmCommand = Get-CommandLocation -Name 'npm.cmd'
+  if (-not $npmCommand) {
+    if ($DryRun) {
+      Write-Host '[dry-run] npm.cmd is not available yet because the Node.js installation step was only simulated.' -ForegroundColor Yellow
+      Write-Host "[dry-run] Installing $(Get-CodexPackageSpec) globally" -ForegroundColor Yellow
+      Write-Host '[dry-run] Verifying codex on PATH after installation' -ForegroundColor Yellow
+      return
+    }
+
+    throw 'npm.cmd was not found after the Node.js installation step.'
+  }
+
+  Ensure-NpmCache
+  $packageSpec = Get-CodexPackageSpec
+
+  Invoke-Checked -Description "Installing $packageSpec globally" -Action {
+    & $npmCommand --cache $script:NpmCacheDir install -g $packageSpec --prefix (Join-Path $env:APPDATA 'npm')
+    if ($LASTEXITCODE -ne 0) {
+      throw "Failed to install $packageSpec."
+    }
+  }
+
+  if ($DryRun) {
+    Write-Host '[dry-run] Verifying codex on PATH after installation' -ForegroundColor Yellow
+    return
+  }
+
+  Refresh-CommonToolPaths
+  Confirm-CodexCli
 }
 
 Write-Step 'Checking Git, Node.js, npm, and Codex CLI requirements'
+Write-WarningText 'This bootstrap may install or upgrade system Git, Node.js, and npm.'
+Write-WarningText 'Windows launchers use PowerShell with ExecutionPolicy Bypass.'
 Refresh-CommonToolPaths
-Ensure-Git
-Ensure-NodeToolchain
+Ensure-Git | Out-Null
+Ensure-NodeToolchain | Out-Null
 Refresh-CommonToolPaths
 Install-CodexCli

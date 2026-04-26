@@ -18,10 +18,29 @@ while [[ $# -gt 0 ]]; do
       FORWARDED_ARGS+=("--dry-run")
       shift
       ;;
+    --skip-git|--skip-node|--skip-npm)
+      FORWARDED_ARGS+=("$1")
+      shift
+      ;;
+    --codex-version)
+      if [[ $# -lt 2 ]]; then
+        echo "[error] --codex-version requires a value."
+        exit 1
+      fi
+      FORWARDED_ARGS+=("$1" "$2")
+      shift 2
+      ;;
+    --codex-version=*)
+      FORWARDED_ARGS+=("$1")
+      shift
+      ;;
     -h|--help)
       echo "Usage:"
       echo "  ./install-codex.sh"
       echo "  ./install-codex.sh --dry-run"
+      echo "  ./install-codex.sh --skip-git --skip-node --skip-npm"
+      echo "  ./install-codex.sh --codex-version latest"
+      echo "  ./install-codex.sh --codex-version 0.125.0"
       echo
       echo "This launcher runs scripts/bootstrap-codex-cli-macos.sh."
       exit 0

@@ -4,7 +4,7 @@
 
 Windows and macOS installer bootstrap for OpenAI Codex CLI.
 
-This project checks whether `git`, `node`, and `npm` are installed, verifies that their versions meet the current `@openai/codex` package requirements, upgrades missing or outdated dependencies when possible, and then installs the latest Codex CLI automatically.
+This project checks whether `git`, `node`, and `npm` are installed, verifies that their versions meet the current `@openai/codex` package requirements, upgrades missing or outdated dependencies when possible, and then installs Codex CLI automatically.
 
 By default, the bootstrap requires at least:
 
@@ -12,6 +12,14 @@ By default, the bootstrap requires at least:
 - `Git 2.53.0`
 
 These are minimum versions, not pinned versions. If a machine is missing dependencies or is below the minimum, the bootstrap tries to install or upgrade to the current available version that satisfies the requirement.
+
+## Warning
+
+- On Windows, both `install-codex.cmd` and the npm entrypoints run PowerShell with `ExecutionPolicy Bypass`.
+- The bootstrap may install or upgrade system-wide Git, Node.js, and npm.
+- On macOS, if Homebrew is missing, the bootstrap installs Homebrew automatically before continuing.
+- By default, Codex CLI is installed from the official npm package `@openai/codex@latest`.
+- When Windows falls back to direct Node.js or Git installer downloads, the script verifies the downloaded file with SHA256 before running it.
 
 ## Files
 
@@ -51,6 +59,18 @@ install-codex.cmd --dry-run
 ```bash
 ./install-codex.sh --dry-run
 ```
+
+Common options:
+
+```text
+--skip-git
+--skip-node
+--skip-npm
+--codex-version latest
+--codex-version 0.125.0
+```
+
+If a `--skip-*` option is used and the existing tool does not meet the minimum version requirement, the bootstrap stops with an error instead of upgrading it automatically.
 
 If `npm` is already installed, the generic cross-platform entrypoint is:
 
@@ -107,13 +127,16 @@ codex --version
 2. Detects `node` and `npm`
 3. Ensures `Git` is at least `2.53.0`
 4. Ensures `Node.js` is at least `22.22.2`
-5. Fetches the latest `@openai/codex` package metadata from npm
-6. Compares the current local environment against the current Codex CLI requirements
-7. Installs the latest `@openai/codex`
+5. Fetches the current `@openai/codex` package metadata from npm
+6. Compares the local environment against the active Codex CLI requirements
+7. Installs `@openai/codex@latest` by default, or a requested exact version through `--codex-version`
+8. Re-validates the resolved command path and version after every install or upgrade step
+9. Validates direct Windows fallback downloads with SHA256 before launching them
 
 ## Notes
 
 - Windows uses PowerShell and `winget` or official installers.
 - macOS uses Bash and Homebrew.
+- `--codex-version` defaults to `latest`, which follows the current official Codex CLI release on npm.
 - Some corporate or locked-down machines may require Administrator approval.
 - Some environments may still block unattended installers through group policy or endpoint security.

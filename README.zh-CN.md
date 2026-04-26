@@ -4,7 +4,7 @@
 
 这是一个用于 OpenAI Codex CLI 的 Windows 和 macOS 安装引导脚本。
 
-这个项目会检测电脑上是否已经安装 `git`、`node` 和 `npm`，校验它们的版本是否满足当前 `@openai/codex` 的要求，在可能的情况下自动安装或升级缺失依赖，然后继续安装最新版本的 Codex CLI。
+这个项目会检测电脑上是否已经安装 `git`、`node` 和 `npm`，校验它们的版本是否满足当前 `@openai/codex` 的要求，在可能的情况下自动安装或升级缺失依赖，然后继续自动安装 Codex CLI。
 
 默认情况下，这个安装器要求最低版本为：
 
@@ -12,6 +12,14 @@
 - `Git 2.53.0`
 
 这里写的是最低版本，不是强制锁定版本。如果电脑上缺少依赖，或者版本低于下限，脚本会尽量安装或升级到当前可用、并且满足要求的版本。
+
+## 重要提示
+
+- 在 Windows 上，`install-codex.cmd` 和 npm 入口都会通过 `ExecutionPolicy Bypass` 调用 PowerShell。
+- 这个脚本可能会安装或升级系统级的 Git、Node.js 和 npm。
+- 在 macOS 上，如果机器还没有 Homebrew，脚本会先自动安装 Homebrew，再继续执行。
+- 默认情况下，Codex CLI 会从官方 npm 包 `@openai/codex@latest` 安装。
+- 当 Windows 回退到直接下载 Node.js 或 Git 官方安装包时，脚本会先做 SHA256 校验，再执行安装。
 
 ## 文件说明
 
@@ -51,6 +59,18 @@ install-codex.cmd --dry-run
 ```bash
 ./install-codex.sh --dry-run
 ```
+
+常用参数：
+
+```text
+--skip-git
+--skip-node
+--skip-npm
+--codex-version latest
+--codex-version 0.125.0
+```
+
+如果使用了 `--skip-*` 参数，但本机现有工具版本又低于最低要求，脚本会直接报错退出，而不是继续帮你升级。
 
 如果电脑上已经安装了 `npm`，也可以使用通用跨平台入口：
 
@@ -107,13 +127,16 @@ codex --version
 2. 检测 `node` 和 `npm`
 3. 确保 `Git` 版本至少为 `2.53.0`
 4. 确保 `Node.js` 版本至少为 `22.22.2`
-5. 从 npm 获取最新 `@openai/codex` 包的元数据
-6. 对比当前本地环境与 Codex CLI 的要求
-7. 安装最新版本的 `@openai/codex`
+5. 从 npm 获取当前 `@openai/codex` 包的元数据
+6. 对比当前本地环境与 Codex CLI 的实际要求
+7. 默认安装 `@openai/codex@latest`，也可以通过 `--codex-version` 指定精确版本
+8. 每次安装或升级之后，再次校验最终命中的命令路径和版本
+9. 在 Windows 的官方下载回退路径里，先做 SHA256 校验，再执行安装包
 
 ## 说明
 
 - Windows 使用 PowerShell，以及 `winget` 或官方安装包。
 - macOS 使用 Bash 和 Homebrew。
+- `--codex-version` 默认是 `latest`，会跟随 npm 上当前官方发布的 Codex CLI 版本。
 - 某些公司电脑或受限制环境中，安装过程可能需要管理员权限。
 - 某些安全策略或终端防护软件可能会阻止静默安装。
