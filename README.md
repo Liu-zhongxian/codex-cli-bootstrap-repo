@@ -6,10 +6,23 @@ This project checks whether `git`, `node`, and `npm` are installed, verifies tha
 
 ## Files
 
+- `install-codex.cmd`: double-click friendly Windows launcher
 - `package.json`: npm entrypoints
 - `scripts/bootstrap-codex-cli.ps1`: main installer logic
 
 ## Usage
+
+Recommended for most Windows users:
+
+```cmd
+install-codex.cmd
+```
+
+Preview actions without installing:
+
+```cmd
+install-codex.cmd --dry-run
+```
 
 If `npm` is already installed:
 
@@ -17,7 +30,7 @@ If `npm` is already installed:
 npm run setup:codex
 ```
 
-Preview actions without installing:
+Equivalent dry-run through npm:
 
 ```powershell
 npm run setup:codex:dry-run
