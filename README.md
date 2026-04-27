@@ -4,6 +4,20 @@
 
 Windows and macOS installer bootstrap for OpenAI Codex CLI.
 
+## Quick Start
+
+Repository URL:
+
+```text
+https://github.com/Liu-zhongxian/codex-cli-bootstrap-repo
+```
+
+If you know how to use `git`, clone the repository and run the launcher for your platform.
+
+If you do not use `git`, download the repository as a ZIP from GitHub and extract it locally.
+
+This is usually simpler for beginners.
+
 This project checks whether `git`, `node`, and `npm` are installed, verifies that their versions meet the current `@openai/codex` package requirements, upgrades missing or outdated dependencies when possible, and then installs Codex CLI automatically.
 
 By default, the bootstrap requires at least:
@@ -38,11 +52,15 @@ Recommended for Windows users:
 install-codex.cmd
 ```
 
+This is the Windows launcher you can double-click after extracting the ZIP.
+
 Recommended for macOS users:
 
 ```bash
 ./install-codex.sh
 ```
+
+This is the macOS launcher you run from Terminal after extracting the ZIP.
 
 If you downloaded the repository as a ZIP and the shell script is not executable yet:
 

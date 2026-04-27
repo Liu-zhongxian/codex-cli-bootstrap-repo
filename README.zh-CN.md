@@ -4,6 +4,20 @@
 
 这是一个用于 OpenAI Codex CLI 的 Windows 和 macOS 安装引导脚本。
 
+## 小白入口
+
+仓库地址就是：
+
+```text
+https://github.com/Liu-zhongxian/codex-cli-bootstrap-repo
+```
+
+如果你会 `git clone`，可以直接拉下来。
+
+如果你不会，就直接下载 ZIP，然后解压。
+
+这对小白来说反而更简单。
+
 这个项目会检测电脑上是否已经安装 `git`、`node` 和 `npm`，校验它们的版本是否满足当前 `@openai/codex` 的要求，在可能的情况下自动安装或升级缺失依赖，然后继续自动安装 Codex CLI。
 
 默认情况下，这个安装器要求最低版本为：
@@ -38,11 +52,15 @@ Windows 用户建议直接运行：
 install-codex.cmd
 ```
 
+这个就是 Windows 用的启动文件，下载 ZIP 解压后可以直接双击。
+
 macOS 用户建议直接运行：
 
 ```bash
 ./install-codex.sh
 ```
+
+这个就是 macOS 用的启动文件，下载 ZIP 解压后在终端里运行。
 
 如果你是直接下载 ZIP，而不是用 Git 克隆，发现脚本还没有执行权限，可以先运行：
 
